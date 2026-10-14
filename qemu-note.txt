@@ -1,0 +1,150 @@
+# 查找当前目录下大于 100M 的文件并列出
+find . -type f -size +100M -exec du -h {} + | sort -hr | head -n 50
+
+# 删除占用空间较多的 ./.cache/vscode-cpptools/*
+mkdir -p /tmp/vscode-cpptools-cache-backup
+mv ./.cache/vscode-cpptools/* /tmp/vscode-cpptools-cache-backup/
+df -h
+rm -rf /tmp/vscode-cpptools-cache-backup
+
+# 配置并编译内核
+cd ~/linux/linux-6.1.44
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- versatile_defconfig
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- menuconfig
+
+    % 启用调试信息
+    % 在 menuconfig 界面中，按以下路径开启调试选项：
+    <1> 进入 Kernel hacking 菜单。
+    <2> 在 Kernel hacking 菜单的顶部附近，找到并选中 [ ] Kernel debugging 选项。按 SPACEBAR 键将它设置为 [*]。
+    <3> 进入 Compile-time checks and compiler options 子菜单。
+    <4> 进入 Debug information (Rely on the toolchain's implicit default DWARF version) 子菜单。
+    <5> 找到并选中 ( ) Rely on the toolchain's implicit default DWARF version，按 SPACEBAR 键将它设置为 (X)。这会生成完整的 DWARF 调试信息。
+
+## 独立编译
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- -j$(nproc) zImage
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- -j$(nproc) modules
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- -j$(nproc) dtbs
+## 统一编译
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- -j$(nproc) zImage modules dtbs
+## 构建 GDB 脚本
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- scripts_gdb
+
+# 打包 initrd
+cd ~/busybox/busybox-1.36.1/_install
+find . -print0 | cpio --null -o -H newc --owner=root:root | gzip -9 > ../initrd.img
+
+# 启动 QEMU
+qemu-system-arm -M versatilepb \
+    -kernel ~/linux/linux-6.1.44/arch/arm/boot/zImage \
+    -dtb ~/linux/linux-6.1.44/arch/arm/boot/dts/versatile-pb.dtb \
+    -initrd ~/busybox/busybox-1.36.1/initrd.img \
+    -append "root=/dev/ram0 console=ttyAMA0,115200 nokaslr" \
+    -nographic
+
+# 启动 QEMU 并开启 GDB 调试服务
+qemu-system-arm -M versatilepb \
+    -kernel ~/linux/linux-6.1.44/arch/arm/boot/zImage \
+    -dtb ~/linux/linux-6.1.44/arch/arm/boot/dts/versatile-pb.dtb \
+    -initrd ~/busybox/busybox-1.36.1/initrd.img \
+    -append "root=/dev/ram0 console=ttyAMA0,115200 nokaslr" \
+    -nographic -s -S
+
+/* -s：在TCP 1234端口开启GDB调试服务
+   -S：让CPU在启动时暂停，等待GDB连接
+   nokaslr：关闭内核地址空间随机化，确保断点稳定
+*/
+
+# 启动 QEMU 并添加 -d trace:pl022* 来跟踪SPI控制器的寄存器操作
+qemu-system-arm -M versatilepb \
+    -kernel ~/linux/linux-6.1.44/arch/arm/boot/zImage \
+    -dtb ~/linux/linux-6.1.44/arch/arm/boot/dts/versatile-pb.dtb \
+    -initrd ~/busybox/busybox-1.36.1/initrd.img \
+    -append "root=/dev/ram0 console=ttyAMA0,115200 nokaslr" \
+    -d trace:pl022* \
+    -nographic -s -S
+
+# 启动 GDB 调试
+cd ~/linux/linux-6.1.44
+gdb-multiarch vmlinux
+(gdb) target remote localhost:1234
+
+# 手动将 101f4000.spi 设备绑定到 pl022 驱动
+echo 101f4000.spi > /sys/bus/amba/drivers/pl022/bind
+
+# 使用交叉编译器静态编译 spidev_test，添加 -g 选项保留调试信息
+arm-linux-gnueabi-gcc -static -g -o spidev_test spidev_test.c
+
+# 反汇编 pl022.ko
+arm-linux-gnueabi-objdump -fS pl022.ko > pl022.as
+
+# 生成 /dev/spidev0.0 设备文件
+mknod /dev/spidev0.0 c 153 0
+
+# 运行 spidev_test 测试
+./bin/spidev_test -D /dev/spidev0.0 -v
+./bin/spidev_test -D /dev/spidev0.0 -s 1000000 -v
+
+# 通过 GDB 调试内核模块 <https://linuxkernel.org.cn/doc/html/latest/process/debugging/gdb-kernel-debugging.html>
+cd ~/linux/linux-6.1.44
+## 1）构建 GDB 脚本
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- scripts_gdb
+## 2）临时设置 PYTHONPATH 环境变量
+export PYTHONPATH=$PYTHONPATH:~/linux/linux-6.1.44/scripts/gdb
+## 3）启动 GDB 调试
+gdb-multiarch vmlinux
+(gdb) set auto-load safe-path ~/linux/linux-6.1.44    // 如果 gdb 报告拒绝加载 vmlinux-gdb.py，请添加
+(gdb) source scripts/gdb/vmlinux-gdb.py
+(gdb) add-symbol-file ~/drivers/pl022/pl022.ko
+(gdb) lx-symbols ~/drivers/pl022/
+(gdb) target remote :1234
+
+# 用户态 Socket API 实践：在QEMU 环境中，用 vcan（虚拟 CAN 接口） 跑通 CAN 帧的收发
+## 1）下载 can-utils
+git clone https://github.com/linux-can/can-utils.git
+cd can-utils/
+## 2）使用交叉编译器静态编译 can-utils （一定要有 LDFLAGS="-static" 选项）
+make CC=arm-linux-gnueabi-gcc CFLAGS="-static" LDFLAGS="-static"
+## 3）编译完成后，将生成的工具复制到 BusyBox 的 _install/bin/ 目录
+cp cansend candump cangen cansniffer ~/busybox/busybox-1.36.1/_install/bin/
+## 4）重新打包 initrd 并启动 QEMU
+## 5）进入 QEMU 终端后，执行以下命令创建虚拟 CAN 接口
+    ### [1] 加载 vcan 模块（如果编译为模块）
+    modprobe vcan
+    ### [2] 创建 vcan0 接口
+    ip link add dev vcan0 type vcan
+    ### [3] 启用接口
+    ip link set vcan0 up
+    ### [4] 验证接口存在
+    ip link show vcan0
+    ### [5] 使用 candump 后台接收，输出到文件
+    candump vcan0 > /tmp/can.log &
+    ### [6] 使用 cansend 发送报文
+    cansend vcan0 123#1122334455667788
+    ### [7] 查看接收记录
+    cat /tmp/can.log
+    ### [8] 结束后杀掉后台 candump
+    kill %1
+ 
+# ftrace (Function Trace)
+## 1）打开支持 ftrace 的内核选项
+## 2）挂载 tracefs 目录
+    ### <a> （永久生效）编辑 /etc/fstab 文件，添加以下内容
+    debugfs /sys/kernel/debug debugfs defaults 0 0      // （debugfs 方式）
+    或者
+    tracefs /sys/kernel/tracing tracefs defaults 0 0    // （tracefs 方式，推荐）
+    ### <b> （运行时挂载）
+    mount -t debugfs nodev /sys/kernel/debug
+    mount -t tracefs nodev /sys/kernel/tracing
+## 3）查看可用的 tracers 列表（当前位于 /sys/kernel/debug/tracing 目录下）
+cat available_tracers
+## 4）设置当前使用的 tracers（以 function_graph 为例）
+echo function_graph > current_tracer
+## 5）指定要追踪的函数（以 do_sys_open 为例）
+echo do_sys_open > set_ftrace_filter
+## 6）开始追踪
+echo 1 > tracing_on
+## 7）执行你的操作（比如触发一次文件打开）
+## 8）停止追踪
+echo 0 > tracing_on
+## 9）查看结果
+less trace

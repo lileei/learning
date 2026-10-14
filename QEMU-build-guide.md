@@ -1,6 +1,6 @@
 # Step 1: 安装依赖
 sudo apt update
-sudo apt install -y qemu-system-arm arm-linux-gnueabi-gcc arm-linux-gnueabi-binutils gcc make flex bison libncurses-dev libssl-dev bc cpio bzip2 wget rsync
+sudo apt install -y qemu-system-arm gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi gcc make flex bison libncurses-dev libssl-dev bc cpio bzip2 wget rsync
 
 # Step 2: 创建目录
 mkdir -p ~/arm-dev/{kernel,busybox,images}
